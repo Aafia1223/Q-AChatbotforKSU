@@ -10,10 +10,6 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 import warnings
 warnings.filterwarnings('ignore')
 
-
-# In[ ]:
-
-
 class UniversityChatbot():
     def __init__(self, json_file_path):
         """Initialize the chatbot with university data"""
@@ -167,7 +163,7 @@ class UniversityChatbot():
             print(f"❌ Error: Invalid JSON format in {json_file_path}")
             return {}
     
-    def create_sample_data(self):
+    def create_sample_data(self): # needs updating
         """Create sample data structure if JSON file is not found"""
         return {
             "admission_requirements": {
@@ -219,10 +215,8 @@ class UniversityChatbot():
                     current_path = f"{path}[{i}]"
                     extract_text_recursive(item, current_path, parent_key, data)
             elif isinstance(data, str) and len(data.strip()) > 10:
-                # Extract additional fields from parent object
                 additional_fields = {}
                 if parent_obj and isinstance(parent_obj, dict):
-                    # Look for common additional fields like 'info', 'url', 'link', etc.
                     for field in ['info', 'url', 'link', 'source', 'reference']:
                         if field in parent_obj and parent_obj[field]:
                             additional_fields[field] = parent_obj[field]
@@ -232,7 +226,7 @@ class UniversityChatbot():
                     'path': path,
                     'parent_key': parent_key,
                     'content': data.strip(),
-                    **additional_fields  # Include additional fields from parent object
+                    **additional_fields 
                 })
         
         extract_text_recursive(self.data)
@@ -408,11 +402,9 @@ class UniversityChatbot():
                 for key, value in data.items():
                     current_path = f"{path}/{key}" if path else key
                     
-                    # Check if this looks like a college or department
                     if any(term in key.lower() for term in ['college', 'school', 'faculty']):
                         colleges[key] = []
                         
-                        # Look for departments within this college
                         if isinstance(value, dict):
                             for sub_key in value.keys():
                                 if any(term in sub_key.lower() for term in ['department', 'dept', 'program']):
@@ -465,9 +457,9 @@ class UniversityChatbot():
                 "Just reply with one of those!"
             )
 
-        self.conversation_state = None  # Clear state
+        self.conversation_state = None  
 
-        # Handle UNDERGRADUATE requests
+        # Handle admission requirements for undergraduate
         if entities['level'] == 'undergraduate':
             # Look for FAQs section
             for section in self.data:
@@ -480,24 +472,23 @@ class UniversityChatbot():
                             url = section.get("url", "")
                             
                             return (
-                                "🎓 **Undergraduate Admission Requirements**\n\n"
-                                f"**Answer:** {answer}\n\n"
+                                f"{answer}\n\n"
                                 f"🔗 For more detailed information, visit: {url}"
                             )
                     
                     # If specific FAQ not found, provide general undergraduate info from FAQs
                     url = section.get("url", "")
                     return (
-                        "🎓 **Undergraduate Admission Requirements**\n\n"
+                        "Undergraduate Admission Requirements:\n"
                         "Based on the available information, undergraduate admission requirements include:\n\n"
                         "• High school certificate (from within or outside the Kingdom)\n"
-                        "• General Aptitude Test scores\n"
-                        "• Academic Achievement Test scores\n"
-                        "• Meeting specific program requirements\n\n"
-                        f"🔗 For complete details and FAQs, visit: {url}"
+                        "• General Aptitude Test scores (Qudrat scores)\n"
+                        "• Academic Achievement Test scores (Tahsili scores)\n"
+                        "• Each track and major requires different scores for each of these tests.\n\n"
+                        f"For complete details and FAQs, visit: {url}"
                     )
 
-        # Handle MASTERS requests
+        # Handle admission requirements for masters
         elif entities['level'] == 'masters':
             # Look for Admission Requirements section
             for section in self.data:
@@ -518,16 +509,15 @@ class UniversityChatbot():
                                     content += f"\n• **{title}**: {body}"
                             
                             return (
-                                "📚 **Master's Programs Admission Requirements**\n\n"
                                 f"{content}\n\n"
-                                f"🔗 For complete information, visit: {url}"
+                                f"For complete information, visit: {url}"
                             )
                     
                     # If Master's Programs not found in children, provide general info
                     url = section.get("url", "")
                     content = section.get("content", "")
                     return (
-                        "📚 **Master's Programs Admission Requirements**\n\n"
+                        "Master's Programs Admission Requirements: \n"
                         f"{content}\n\n"
                         "Please check the admission requirements section for specific master's program criteria.\n\n"
                         f"🔗 For complete information, visit: {url}"
@@ -554,7 +544,6 @@ class UniversityChatbot():
                                     content += f"\n• **{title}**: {body}"
                             
                             return (
-                                "📚 **PhD's Programs Admission Requirements**\n\n"
                                 f"{content}\n\n"
                                 f"🔗 For complete information, visit: {url}"
                             )
@@ -563,7 +552,7 @@ class UniversityChatbot():
                     url = section.get("url", "")
                     content = section.get("content", "")
                     return (
-                        "🔬 **PhD Programs Admission Requirements**\n\n"
+                        "PhD Programs Admission Requirements: \n"
                         f"{content}\n\n"
                         "Please check the admission requirements section for specific PhD program criteria.\n\n"
                         f"🔗 For complete information, visit: {url}"
@@ -571,7 +560,7 @@ class UniversityChatbot():
 
         # Fallback if level is recognized but no specific info found
         return (
-            f"🤔 I couldn't find specific {entities['level']} admission requirements in our database. "
+            f"I couldn't find specific {entities['level']} admission requirements in our database. "
             "Please try contacting the admissions office directly or visit the university website for the most accurate and up-to-date information."
         )
 
@@ -586,10 +575,10 @@ class UniversityChatbot():
 
         if not calendar_item:
             return (
-                "📅 **Academic Calendar**\n\n"
+                "Academic Calendar:
                 "I couldn't find the academic calendar in our current data. "
                 "Please visit the registrar’s official site for updated info.\n\n"
-                "🔗 https://dar.ksu.edu.sa/en/CurrentCalendar"
+                "https://dar.ksu.edu.sa/en/CurrentCalendar"
             )
 
         url = calendar_item.get("url", "")
@@ -603,8 +592,8 @@ class UniversityChatbot():
             rows = rows[1:]
 
         # Start formatting
-        response = "📅 **Academic Calendar**\n\n"
-        response += f"🔗 [View Full Calendar]({url})\n\n"
+        response = "Academic Calendar: \n"
+        response += f"Here is the calendar: ({url})\n\n"
 
         # Format headers
         if headers and all(isinstance(h, str) for h in headers):
@@ -617,7 +606,7 @@ class UniversityChatbot():
             padded_row = row + [""] * (len(headers) - len(row))
             response += "| " + " | ".join(padded_row[:len(headers)]) + " |\n"
 
-        return response + "\n🗓️ **Need specific dates?** You can ask about registration deadlines, exam schedules, or semester start dates!"
+        return response + "\n Need specific dates?** You can ask about registration deadlines, exam schedules, or semester start dates!"
       
     def handle_degree_programs(self, entities, user_input):
         """
@@ -749,11 +738,11 @@ class UniversityChatbot():
         target_node = find_node(user_input.strip(), self.data)
         
         if not target_node:
-            return ("🤖 I couldn't find that. Try:\n"
-                    "• 'Colleges' - see all categories\n"
-                    "• 'Science Colleges' - see colleges in category\n"
-                    "• 'College of Engineering' - specific college\n"
-                    "• 'Computer Science Department' - department info")
+            return ("I apologize. I could not find that. Try:\n"
+                    "• 'Colleges' to see all categories\n"
+                    "• 'Science Colleges' or any college categories to see colleges in category\n"
+                    "• 'College of Engineering' or any colleges to check out specific college\n"
+                    "• 'Computer Science Department' or any Academic departments in a college to get department info")
         
         node_type = get_node_type(target_node)
         title = target_node.get('title', '')
@@ -761,8 +750,8 @@ class UniversityChatbot():
         # Handle based on node type
         if node_type == 'colleges_root':
             # Show college categories only
-            response = "🏛️ **King Saud University - Colleges**\n\n"
-            response += "📚 **College Categories:**\n\n"
+            response = "King Saud University - Colleges:\n"
+            response += "College Categories:\n"
             
             total_colleges = 0
             for category in target_node.get('children', []):
@@ -771,33 +760,33 @@ class UniversityChatbot():
                     total_colleges += college_count
                     response += f"• **{category['title']}** ({college_count} colleges)\n"
             
-            response += f"\n🎓 **Total: {total_colleges} colleges**\n\n"
-            response += "💡 Ask about any category above for details!"
+            response += f"\n Total: {total_colleges} colleges\n\n"
+            response += "Ask about any category above for details!"
             return response
         
         elif node_type == 'category':
             # Show colleges in this category
-            response = f"🏛️ **{title}**\n\n"
+            response = f"{title}\n\n"
             colleges = target_node.get('children', [])
             
             if colleges:
                 response += f"**Colleges ({len(colleges)} total):**\n\n"
                 for i, college in enumerate(colleges, 1):
                     if isinstance(college, dict) and 'title' in college:
-                        response += f"{i}. **{college['title']}**\n"
+                        response += f"{i}. {college['title']}\n"
                         if college.get('url'):
-                            response += f"   🔗 {college['url']}\n"
+                            response += f"    {college['url']}\n"
                         response += "\n"
             
-            response += "💡 Ask about any college above for details!"
+            response += "Ask about any college above for details!"
             return response
         
         elif node_type == 'college':
             # Show college info + list departments (titles only)
-            response = f"🎓 **{title}**\n\n"
+            response = f"{title}\n\n"
             
             if target_node.get('url'):
-                response += f"🔗 **Website:** {target_node['url']}\n\n"
+                response += f"Website: {target_node['url']}\n\n"
             
             # Find About College section
             about_content = None
@@ -811,39 +800,39 @@ class UniversityChatbot():
                         departments = child.get('children', [])
             
             if about_content:
-                response += f"**About the College:**\n{about_content}\n\n"
+                response += f"About the College:\n{about_content}\n\n"
             
             if departments:
-                response += f"**Academic Departments ({len(departments)} total):**\n\n"
+                response += f"Academic Departments ({len(departments)} total):\n\n"
                 for i, dept in enumerate(departments, 1):
                     if isinstance(dept, dict) and 'title' in dept:
-                        response += f"{i}. **{dept['title']}**\n"
+                        response += f"{i}. {dept['title']}\n"
                 
-                response += "\n💡 Ask about any department for detailed info!"
+                response += "\n Ask about any department for detailed info!"
             
             return response
         
         elif node_type == 'department':
             # Show full department details
-            response = f"🎓 **{title}**\n\n"
+            response = f"{title}\n\n"
             
             if target_node.get('url'):
-                response += f"🔗 **Website:** {target_node['url']}\n\n"
+                response += f"Website: {target_node['url']}\n\n"
             
             if target_node.get('content'):
                 content = target_node['content'].strip()
                 if content:
-                    response += f"**About the Department:**\n{content}\n\n"
+                    response += f"About the Department:\n{content}\n\n"
             
             if target_node.get('contact_info'):
                 contact = target_node['contact_info'].strip()
                 if contact:
-                    response += f"📞 **Contact Information:**\n{contact}\n\n"
+                    response += f"Contact Information:\n{contact}\n\n"
             
             # Faculty links
             faculty_links = target_node.get('faculty_links', []) + target_node.get('faculty_staff_links', [])
             if faculty_links:
-                response += "👨‍🏫 **Faculty & Staff:**\n"
+                response += "Faculty & Staff:\n"
                 for link in faculty_links:
                     if isinstance(link, dict):
                         title_text = link.get('title', 'Faculty Link')
@@ -854,7 +843,7 @@ class UniversityChatbot():
             return response
         
         else:
-            return f"ℹ️ Found '{title}' but couldn't determine its type. Please be more specific."
+            return f"Found '{title}' but couldn't determine its type. Please be more specific."
        
     def handle_faculty_directory(self, entities, user_input):
         """Handle faculty directory by parsing hierarchical structure"""
@@ -876,7 +865,7 @@ class UniversityChatbot():
         # Parse the hierarchical data structure to find faculty links
         faculty_data = self.parse_faculty_structure()
         
-        response = "👥 **Faculty Directory**\n\n"
+        response = "Faculty Directory\n\n"
         faculty_found = False
         
         college_query = entities.get('college', '').lower()
@@ -888,7 +877,7 @@ class UniversityChatbot():
                 continue
                 
             college_has_matches = False
-            college_response = f"**{college_name}**\n"
+            college_response = f"{college_name}\n"
             
             for dept_name, faculty_links in departments.items():
                 # Check if this department matches the query
@@ -898,12 +887,12 @@ class UniversityChatbot():
                 if faculty_links:
                     faculty_found = True
                     college_has_matches = True
-                    college_response += f"\n*{dept_name}*\n"
+                    college_response += f"\n{dept_name}\n"
                     
                     for faculty_link in faculty_links:
                         title = faculty_link.get('title', 'Faculty Directory')
                         url = faculty_link.get('url', '#')
-                        college_response += f"🔗 [{title}]({url})\n"
+                        college_response += f"[{title}]({url})\n"
                     
                     college_response += "\n"
             
@@ -913,14 +902,14 @@ class UniversityChatbot():
         # If no specific query, show all faculty links
         if not college_query and not department_query:
             for college_name, departments in faculty_data.items():
-                response += f"**{college_name}**\n"
+                response += f"{college_name}\n"
                 for dept_name, faculty_links in departments.items():
                     if faculty_links:
-                        response += f"\n*{dept_name}*\n"
-                        for faculty_link in faculty_links[:2]:  # Limit to 2 links per dept
+                        response += f"\n{dept_name}\n"
+                        for faculty_link in faculty_links[:5]:  # Limit to 2 links per dept
                             title = faculty_link.get('title', 'Faculty Directory')
                             url = faculty_link.get('url', '#')
-                            response += f"🔗 [{title}]({url})\n"
+                            response += f"[{title}]({url})\n"
                         response += "\n"
                 response += "\n"
             faculty_found = True
@@ -938,15 +927,14 @@ class UniversityChatbot():
         housing_section = self.find_housing_with_data()
         
         if not housing_section:
-            return "🏠 Housing information not found."
+            return "Housing information not found."
         
         # If no user type specified, ask for clarification
         if not entities.get('user_type'):
             housing_types = self.get_housing_types(housing_section)
-            response = "🏠 I'd be happy to help with housing information! Please specify:\n\n"
+            response = "I'd be happy to help with housing information! Please specify:\n\n"
             for housing_type in housing_types:
-                emoji = "🎓" if "student" in housing_type.lower() else "👨‍🏫"
-                response += f"{emoji} **{housing_type}**\n"
+                response += f"{housing_type}\n"
             return response + "\nWhich type of housing are you interested in?"
         
         # Handle faculty housing
@@ -957,7 +945,7 @@ class UniversityChatbot():
         elif entities['user_type'].lower() in ['student']:
             return self.handle_student_housing(housing_section)
         
-        return "🏠 Please specify faculty or student housing."
+        return "Please specify faculty or student housing."
 
     def find_housing_with_data(self):
         """Find the Housing section that contains actual data (not empty)"""
@@ -1002,19 +990,19 @@ class UniversityChatbot():
         
         if not faculty_housing:
             available_children = [child.get('title', 'No title') for child in housing_section.get('children', [])]
-            return f"🏠 Faculty housing not found. Available options: {', '.join(available_children)}"
+            return f"Faculty housing not found. Available options: {', '.join(available_children)}"
         
-        response = "🏠 **Faculty Housing**\n\n"
+        response = "Faculty Housing\n\n"
         
         # Display direct children of Faculty Housing
         for child in faculty_housing.get('children', []):
             title = child.get('title', '')
             url = child.get('url', '')
             
-            response += f"📋 **{title}**\n"
+            response += f"{title}\n"
             
             if url:
-                response += f"🔗 [Access {title}]({url})\n"
+                response += f"[Access {title}]({url})\n"
             
             # If this child has its own children (like "Related Links"), display them
             if child.get('children'):
@@ -1034,23 +1022,23 @@ class UniversityChatbot():
         
         if not student_housing:
             available_children = [child.get('title', 'No title') for child in housing_section.get('children', [])]
-            return f"🏠 Student housing not found. Available options: {', '.join(available_children)}"
+            return f"Student housing not found. Available options: {', '.join(available_children)}"
         
-        response = "🏠 **Student Housing**\n\n"
+        response = "Student Housing:\n\n"
         
         for child in student_housing.get('children', []):
             title = child.get('title', '')
             url = child.get('url', '')
             content = child.get('content', '')
             
-            response += f"📋 **{title}**\n"
+            response += f"{title}\n"
             
             # Show content if available (like the procedural guide)
             if content:
                 # Format the content nicely
                 formatted_content = self.format_housing_content(content)
                 response += f"{formatted_content}\n"
-            
+             
             if url:
                 response += f"🔗 [Access {title}]({url})\n"
             
@@ -1067,14 +1055,14 @@ class UniversityChatbot():
         if not parent_section.get('children'):
             return ""
         
-        response = f"\n**Available options:**\n"
+        response = f"\nAvailable options:\n"
         
         for child in parent_section.get('children', []):
             child_title = child.get('title', '')
             child_url = child.get('url', '')
             
             if child_title:
-                response += f"• **{child_title}**"
+                response += f"• {child_title}"
                 if child_url:
                     response += f" - [Access here]({child_url})"
                 response += "\n"
@@ -1148,18 +1136,18 @@ class UniversityChatbot():
                     elif "location" in title:
                         location = section.get("url", "")
 
-                response = f"📚 **{matched_library['title']}**\n\n"
+                response = f"{matched_library['title']}\n\n"
                 if info:
-                    response += f"**Information:**\n{info}\n\n"
+                    response += f"Information:\n{info}\n"
                 if contact:
-                    response += f"**Contact Info:**\n{contact}\n\n"
+                    response += f"Contact Info:\n{contact}\n"
                 if location:
-                    response += f"**Location:** {location}"
+                    response += f"Location: {location}"
                 return response.strip()
 
             # STEP 2b: User just selected the category, list children
             library_titles = [child["title"] for child in selected_category.get("children", [])]
-            return f"Here are the libraries under **{selected_category['title']}**:\n" + "\n".join(f"- {title}" for title in library_titles)
+            return f"Here are the libraries under {selected_category['title']}:\n" + "\n".join(f"- {title}" for title in library_titles)
 
         # STEP 3: User mentioned a library directly without saying category
         for category in libraries_root.get("children", []):
@@ -1175,25 +1163,25 @@ class UniversityChatbot():
                     elif "location" in title:
                         location = section.get("url", "")
 
-                response = f"📚 **{matched_library['title']}**\n\n"
+                response = f"{matched_library['title']}\n\n"
                 if info:
-                    response += f"**Information:**\n{info}\n\n"
+                    response += f"Information:\n{info}\n"
                 if contact:
-                    response += f"**Contact Info:**\n{contact}\n\n"
+                    response += f"Contact Info:\n{contact}\n"
                 if location:
-                    response += f"**Location:** {location}"
+                    response += f"Location: {location}"
                 return response.strip()
 
         # STEP 4: User only said "libraries" → ask to choose category
         category_titles = [cat["title"] for cat in libraries_root.get("children", [])]
-        return "🤖 Would you like to know about one of the following library categories?\n" + "\n".join(f"- {title}" for title in category_titles)
+        return "Would you like to know about one of the following library categories?\n" + "\n".join(f"- {title}" for title in category_titles)
     
     def handle_grading_system(self):
         """Handle grading system with semantic search"""
         query = "grading system grade scale GPA evaluation assessment"
         relevant_content = self.find_relevant_content_semantic(query, top_k=5)
         
-        response = "📊 **Grading System**\n\n"
+        response = "Grading System\n"
         
         for content in relevant_content[:3]:
             content_text = content['content']
@@ -1207,9 +1195,9 @@ class UniversityChatbot():
             # Check metadata for additional fields like 'info'
             metadata = content.get('metadata', {})
             if 'info' in metadata and metadata['info']:
-                response += f"🔗 [Study and Examinations Regulations PDF]({metadata['info']})\n\n"
+                response += f"Here are complete Study and Examinations Regulations PDF:({metadata['info']})\n\n"
             elif 'url' in metadata and metadata['url']:
-                response += f"🔗 [Additional information]({metadata['url']})\n\n"
+                response += f"Additional information:({metadata['url']})\n\n"
         
         if not relevant_content:
             response += "Grading system information is not available in our current database. Please check the student handbook or contact academic affairs.\n\n"
@@ -1221,13 +1209,13 @@ class UniversityChatbot():
         query = "plagiarism academic integrity policy cheating misconduct"
         relevant_content = self.find_relevant_content_semantic(query, top_k=5)
         
-        response = "⚠️ **Academic Integrity & Plagiarism Policy**\n\n"
+        response = "Academic Integrity & Plagiarism Policy\n"
         
         for content in relevant_content[:3]:
             response += content['content'] + "\n\n"
             links = self.extract_links_from_content(content['content'])
             if links:
-                response += f"🔗 [Full policy]({links[0]})\n\n"
+                response += f"Full policy: ({links[0]})\n\n"
         
         if not relevant_content:
             response += "Plagiarism policy information is not available in our current database. Please check the student handbook or contact academic affairs.\n\n"
@@ -1239,14 +1227,14 @@ class UniversityChatbot():
         query = "attendance policy class attendance requirements"
         relevant_content = self.find_relevant_content_semantic(query, top_k=3)
         
-        response = "📋 **Attendance Policy**\n\n"
+        response = "Attendance Policy: \n"
         
         if relevant_content:
             for content in relevant_content:
                 response += content['content'] + "\n\n"
                 links = self.extract_links_from_content(content['content'])
                 if links:
-                    response += f"🔗 [Attendance policy]({links[0]})\n\n"
+                    response += f"Attendance policy: ({links[0]})\n\n"
         else:
             response += "Please refer to the grading system document for detailed attendance requirements.\n\n"
         
@@ -1259,7 +1247,7 @@ class UniversityChatbot():
             # Check if this is grading system content and has info field
             if 'info' in metadata and metadata['info']:
                 response += f"📖 Please refer to the Study and Examinations Regulations for detailed attendance policy:\n"
-                response += f"🔗 [Attendance found here: ]({metadata['info']})\n\n"
+                response += f"Attendance found here: ({metadata['info']})\n\n"
                 break
         
         return response
@@ -1267,7 +1255,7 @@ class UniversityChatbot():
     def handle_research_labs(self):
         """Handle research labs and facilities - find Research node with Labs child"""
         
-        response = "🔬 **Research Labs & Facilities**\n\n"
+        response = "Research Labs & Facilities: \n"
         
         # This assumes you have access to the original JSON data
         # You'll need to replace 'self.json_data' with however you access your JSON
@@ -1625,4 +1613,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
