@@ -10,4 +10,7 @@ The chatbot answers questions about:
 - FAQs
 - Research institutes
 
+## How to open the chatbot 
 
+1- Download Webscrape.py, chatbot.py, main.py and menu_hierarchy.json and put them in the same directory.
+2- Import necessary libraries 
