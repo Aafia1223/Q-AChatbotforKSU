@@ -5,7 +5,7 @@ import os
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from chatbot import UniversityChatbot
-from Webscrape import scrape_and_update  # updated import
+from Webscrape import scrape_and_update  
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -23,7 +23,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-JSON_FILE_PATH = "C:\\Nawal\\IT Department\\Practical Training\\Final Chatbot\\data_backups\\menu_hierarchy.json"
+JSON_FILE_PATH = "" # Add your json file path here
 
 # Multi-user sessions
 chatbot_sessions: Dict[str, UniversityChatbot] = {}
@@ -74,7 +74,7 @@ def chat_endpoint(request: ChatRequest):
 @app.post("/scrape", response_model=ScrapeResponse)
 def run_scraper():
     """
-    Runs your scraper from Webscrape.py, updates JSON, and reloads all sessions.
+    Running scraper, updates json file if there are any changes in the website and reloads sessions to avoid so many conversations.
     """
     try:
         output_path = scrape_and_update()
@@ -90,9 +90,9 @@ def run_scraper():
 async def welcome_message():
     return {
         "response": (
-            "🎓 Welcome! I can help with admissions, academics, libraries, housing, faculty, fees, research, and more. "
+            "Welcome! I can answer questions about admissions, academics, libraries, housing, college info, research, and more. "
             "Type your question or 'help' for examples.\n"
-            "💡 Tip: Ask natural questions like 'How do I apply for undergraduate admission?' or 'What are the library hours?'\n"
+            "Tip: Ask natural questions like 'How do I apply for undergraduate admission?' or 'What are the library hours?'\n"
             "Type 'help' for examples, or 'exit' to quit."
         )
     }
@@ -126,4 +126,5 @@ def startup_event():
 def shutdown_event():
     """Shutdown scheduler when API stops."""
     scheduler.shutdown()
+
 
