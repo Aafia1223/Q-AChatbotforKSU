@@ -1,4 +1,4 @@
-# Q-A ChatbotforKSU
+# Q-A Chatbot for KSU
 
 This is a chatbot that answers questions related to King Saud University. 
 The chatbot answers questions about:
