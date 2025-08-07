@@ -13,10 +13,14 @@ The chatbot answers questions about:
 ## How to open the chatbot 
 
 1- Download Webscrape.py, chatbot.py, app.py and  main.py and put them in the same directory.
+
 2- Download menu_hierarchy.json and put them anywhere in any folder or even in the same directory as the Python files. 
-2- Import necessary libraries from Requirements.txt.
-3- In main.py, in the Config section, put the path of the menu_hierarchy.json to JSON_FILE_PATH.
-4- First run main.py and then app.py in different terminals. To run them:
+
+3- Import necessary libraries from Requirements.txt.
+
+4- In main.py, in the Config section, put the path of the menu_hierarchy.json to JSON_FILE_PATH.
+
+5- First run main.py and then app.py in different terminals. To run them:
     -> Ensure both terminals direct to the folder main.py and app.py are in
     -> To run main.py, type this in its terminal: -m uvicorn main:app --reload
     -> To run app.py, type this in its terminal: streamlit run app.py
