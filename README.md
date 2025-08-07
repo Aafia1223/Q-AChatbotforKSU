@@ -21,6 +21,7 @@ The chatbot answers questions about:
 4- In main.py, in the Config section, put the path of the menu_hierarchy.json to JSON_FILE_PATH.
 
 5- First run main.py and then app.py in different terminals. To run them:
+
     - Ensure both terminals direct to the folder main.py and app.py are in
     
     - To run main.py, type this in its terminal: -m uvicorn main:app --reload
