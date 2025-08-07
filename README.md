@@ -16,7 +16,7 @@ The chatbot answers questions about:
 
 2- Download menu_hierarchy.json and put them anywhere in any folder or even in the same directory as the Python files. 
 
-3- Import necessary libraries from Requirements.txt.
+3- Import necessary libraries from requirements.txt.
 
 4- In main.py, in the Config section, put the path of the menu_hierarchy.json to JSON_FILE_PATH.
 
