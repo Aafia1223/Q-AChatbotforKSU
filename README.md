@@ -27,3 +27,5 @@ The chatbot answers questions about:
     - To run main.py, type this in its terminal: -m uvicorn main:app --reload
     
     - To run app.py, type this in its terminal: streamlit run app.py
+
+Updates will be made soon
