@@ -575,7 +575,7 @@ class UniversityChatbot():
 
         if not calendar_item:
             return (
-                "Academic Calendar:
+                "Academic Calendar:"
                 "I couldn't find the academic calendar in our current data. "
                 "Please visit the registrar’s official site for updated info.\n\n"
                 "https://dar.ksu.edu.sa/en/CurrentCalendar"

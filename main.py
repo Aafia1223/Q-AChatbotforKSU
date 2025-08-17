@@ -1,4 +1,5 @@
-from fastapi import FastAPI, HTTPException
+import fastapi
+from fastapi import HTTPException, FastAPI
 from pydantic import BaseModel
 from typing import Dict
 import os
@@ -23,7 +24,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-JSON_FILE_PATH = "" # Add your json file path here
+JSON_FILE_PATH = "menu_hierarchy.json" # Add your json file path here
 
 # Multi-user sessions
 chatbot_sessions: Dict[str, UniversityChatbot] = {}
@@ -90,10 +91,15 @@ def run_scraper():
 async def welcome_message():
     return {
         "response": (
-            "Welcome! I can answer questions about admissions, academics, libraries, housing, college info, research, and more. "
-            "Type your question or 'help' for examples.\n"
-            "Tip: Ask natural questions like 'How do I apply for undergraduate admission?' or 'What are the library hours?'\n"
-            "Type 'help' for examples, or 'exit' to quit."
+            "Welcome! I can answer questions about:\n"
+            "Admission requirements for undergraduates, masters and PhD\n"
+            "Academic Calendar\n"
+            "Academic Calendar\n"
+            "College categories, their colleges and the college's academic departments and their faculty directories and contact number if any\n"
+            "Student services such as housing and libraries\n"
+            "Policies and grading system\n"
+            "FAQs\n"
+            "Type your questions, 'help' for examples, or 'exit' to quit."
         )
     }
 
