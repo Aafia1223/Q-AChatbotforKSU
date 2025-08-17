@@ -24,15 +24,16 @@ st.markdown("""
         max-width: 80%;
         line-height: 1.4;
         font-size: 16px;
+        color: white;
     }
 
     .bot {
-        background-color: #dbeafe;
+        background-color: #3d4f54;
         align-self: flex-start;
     }
 
     .user {
-        background-color: #fcd34d;
+        background-color: #0e0c82;
         align-self: flex-end;
     }
 
@@ -77,19 +78,31 @@ if not st.session_state.messages:
         res = requests.get("http://127.0.0.1:8000/welcome")
         welcome = res.json()["response"]
         st.session_state.messages.append({"role": "bot", "content": welcome})
-    except Exception as e:
+    except Exception:
         st.session_state.messages.append({
             "role": "bot",
             "content": "⚠️ Unable to fetch welcome message from the server. Is FastAPI running?"
         })
 
 # ----------------- Display Chat -----------------
-st.markdown("<div class='chat-container chat-wrapper'>", unsafe_allow_html=True)
-for msg in st.session_state.messages:
-    role = msg["role"]
-    bubble_class = "bot" if role == "bot" else "user"
-    st.markdown(f"<div class='chat-bubble {bubble_class}'>{msg['content']}</div>", unsafe_allow_html=True)
-st.markdown("</div>", unsafe_allow_html=True)
+chat_container = st.container()
+with chat_container:
+    st.markdown("<div class='chat-container chat-wrapper' id='chat-wrapper'>", unsafe_allow_html=True)
+    for msg in st.session_state.messages:
+        role = msg["role"]
+        bubble_class = "bot" if role == "bot" else "user"
+        st.markdown(f"<div class='chat-bubble {bubble_class}'>{msg['content']}</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# Auto-scroll to bottom
+st.markdown("""
+<script>
+    var chatBox = window.parent.document.getElementById("chat-wrapper");
+    if (chatBox) {
+        chatBox.scrollTop = chatBox.scrollHeight;
+    }
+</script>
+""", unsafe_allow_html=True)
 
 # ----------------- User Input -----------------
 with st.form(key="chat_form", clear_on_submit=True):
@@ -106,11 +119,9 @@ if submit and user_input.strip():
             "message": user_input
         })
         reply = res.json().get("response", "Sorry, I didn’t understand that.")
-    except Exception as e:
+    except Exception:
         reply = "⚠️ Failed to connect to backend. Make sure FastAPI is running."
 
-    # Show bot response with a short delay for realism
     with st.spinner("KSU Assistant is typing..."):
         time.sleep(0.5)
     st.session_state.messages.append({"role": "bot", "content": reply})
-
