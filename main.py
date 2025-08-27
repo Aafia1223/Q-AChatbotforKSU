@@ -96,15 +96,15 @@ def scheduled_scrape():
     try:
         output_path = scrape_and_update()
         reload_all_sessions(output_path)
-        print(f"✅ Auto-scrape completed and reloaded: {output_path}")
+        print(f"Auto-scrape completed and reloaded: {output_path}")
     except Exception as e:
-        print(f"❌ Auto-scrape failed: {e}")
+        print(f"Auto-scrape failed: {e}")
 
 @app.on_event("startup")
 def startup_event():
     if not os.path.exists(JSON_FILE_PATH):
         raise FileNotFoundError(f"JSON file not found: {JSON_FILE_PATH}")
-    print("✅ Server startup: Ready.")
+    print("Server startup: Ready.")
     scheduler.add_job(scheduled_scrape, "interval", hours=24)
     scheduler.start()
 
@@ -257,7 +257,19 @@ async def chat_gui():
             const sendBtn = document.getElementById("send-btn");
 
             const menuData = {json.dumps(data)};
-            let currentMenu = menuData;
+            const allowedTopButtons = [
+                "Study at KSU",
+                "Regulations and Policies",
+                "FAQs",
+                "Research",
+                "Libraries",
+                "Academic Calendar",
+                "It Helpdesk",
+                "Housing"
+            ];
+            let currentMenu = menuData.filter(item =>
+                allowedTopButtons.includes(item.title)
+            );
             let menuStack = [];
 
             async function fetchWelcome() {{
