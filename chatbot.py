@@ -4,13 +4,101 @@ import spacy
 import re
 import torch
 from collections import defaultdict
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, util
 import numpy as np
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 import warnings
 warnings.filterwarnings('ignore')
+import requests
+import fitz
+from io import BytesIO
+import nest_asyncio
+import asyncio
+import aiohttp
+import pickle
+import os
+import hashlib 
+
+def compute_md5(text):
+    import hashlib
+    return hashlib.md5(text.encode("utf-8")).hexdigest()
+
+async def initialize_chatbot(json_file_path):
+    """Initialize chatbot with cached embeddings and merged PDFs."""
+    chatbot = UniversityChatbot(json_file_path)
+
+    # --- JSON embeddings caching ---
+    json_cache_file = "json_embeddings.pkl"
+    json_hash_file = "json_hash.pkl"
+
+    with open(json_file_path, "r", encoding="utf-8") as f:
+        json_text = f.read()
+    json_hash = compute_md5(json_text)
+
+    json_cache_valid = os.path.exists(json_cache_file) and os.path.exists(json_hash_file)
+    if json_cache_valid:
+        with open(json_hash_file, "rb") as f:
+            cached_hash = pickle.load(f)
+        json_cache_valid = (cached_hash == json_hash)
+
+    if json_cache_valid:
+        with open(json_cache_file, "rb") as f:
+            chatbot.corpus_embeddings = pickle.load(f)
+        with open(json_hash_file, "rb") as f:
+            pickle.load(f)
+        print("Loaded JSON embeddings from cache")
+    else:
+        chatbot.prepare_semantic_corpus()
+        with open(json_cache_file, "wb") as f:
+            pickle.dump(chatbot.corpus_embeddings, f)
+        with open(json_hash_file, "wb") as f:
+            pickle.dump(json_hash, f)
+        print("Created and cached JSON embeddings")
+
+    # --- PDF embeddings caching ---
+    pdf_cache_file = "pdf_embeddings.pkl"
+    if os.path.exists(pdf_cache_file):
+        with open(pdf_cache_file, "rb") as f:
+            chatbot.pdf_docs = pickle.load(f)
+        print("Loaded PDF embeddings from cache")
+    else:
+        # If async is desired, wrap this in asyncio.run(chatbot.load_all_pdfs()) outside
+        await chatbot.load_all_pdfs()
+        with open(pdf_cache_file, "wb") as f:
+            pickle.dump(chatbot.pdf_docs, f)
+        print("Loaded and cached PDFs")
+
+    # --- Merge PDFs into main corpus ---
+    for doc_name, doc_info in chatbot.pdf_docs.items():
+        if doc_info.get("text") and (doc_info.get("chunks") is None or doc_info.get("embeddings") is None):
+            chunks = [doc_info["text"][i:i+1000] for i in range(0, len(doc_info["text"]), 1000)]
+            doc_info["chunks"] = chunks
+            doc_info["embeddings"] = chatbot.sentence_model.encode(chunks, convert_to_tensor=True)
+
+        for i, chunk in enumerate(doc_info.get("chunks", [])):
+            chatbot.corpus.append(chunk)
+            chatbot.corpus_metadata.append({
+                "path": f"PDF:{doc_name}_chunk_{i}",
+                "parent_key": doc_name,
+                "content": chunk,
+                "source": doc_info.get("url")
+            })
+        if doc_info.get("embeddings") is not None:
+            if chatbot.corpus_embeddings is not None:
+                chatbot.corpus_embeddings = torch.cat([chatbot.corpus_embeddings, doc_info["embeddings"]])
+            else:
+                chatbot.corpus_embeddings = doc_info["embeddings"]
+
+    print(f"Total corpus segments: {len(chatbot.corpus)}")
+    pdf_count = sum(1 for m in chatbot.corpus_metadata if "PDF:" in m["path"])
+    print(f"Number of PDF segments in corpus: {pdf_count}")
+    print("Chatbot initialized with JSON + PDF embeddings")
+
+    return chatbot
 
 class UniversityChatbot():
+
+    # Initializing the university chatbot with the data and intent
     def __init__(self, json_file_path):
         """Initialize the chatbot with university data"""
         
@@ -34,16 +122,16 @@ class UniversityChatbot():
         
         # Initialize Sentence Transformer for semantic similarity
         try:
-            self.sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
+            self.sentence_model = SentenceTransformer('all-mpnet-base-v2')
         except Exception as e:
             print(f"⚠️  Error loading sentence transformer: {e}")
             try:
-                self.sentence_model = SentenceTransformer('all-mpnet-base-v2')
+                self.sentence_model = SentenceTransformer('all-miniLM-L6-v2')
             except:
                 try:
                     self.sentence_model = SentenceTransformer('paraphrase-MiniLM-L3-v2')
                 except:
-                    print("❌ Could not load any sentence transformer model")
+                    print("Could not load any sentence transformer model")
                     self.sentence_model = None
         
         # Initialize local LLM for better response generation (optional)
@@ -60,10 +148,9 @@ class UniversityChatbot():
             self.generator = None
         
         # Load university data
+        self.json_file_path = json_file_path
         self.data = self.load_data(json_file_path)
         
-        # Prepare semantic corpus
-        self.prepare_semantic_corpus()
         
         # Enhanced intent patterns with semantic variations
         self.intent_patterns = {
@@ -131,7 +218,7 @@ class UniversityChatbot():
             ],
             'fees_tuition': [
                 'tuition fees', 'cost of education', 'fee structure', 'payment information',
-                'how much does it cost', 'financial information', 'fee payment'
+                'how much does it cost', 'fee payment'
             ],
             'scholarships': [
                 'scholarship information', 'financial aid', 'funding opportunities',
@@ -140,65 +227,95 @@ class UniversityChatbot():
         }
         
         # Create intent embeddings for semantic matching
+        self.intent_embeddings = None
         if self.sentence_model:
             self.create_intent_embeddings()
         
-        # User context to track conversation state
+        # Conversation context
         self.user_context = {'last_intent': None, 'entities': {}}
         self.conversation_state = None
         self.user_type = None
+
+        # PDFs
+        self.pdf_docs = {
+            "Student Rights Protection Unit": {"url": "...", "text": "", "embeddings": None, "chunks": None},
+            "Engineering Regulations": {"url": "...", "text": "", "embeddings": None, "chunks": None}
+        }
         
-    def load_data(self, json_file_path):
-        """Load the university data from JSON file"""
+        # Corpus placeholders (JSON + PDFs)
+        self.corpus = []
+        self.corpus_metadata = []
+        self.corpus_embeddings = None
+        
+    async def load_pdf_async(self, doc_name, doc_info):
+        """Download PDF, extract text with fitz, split into chunks, compute embeddings asynchronously.
+        Skip if embeddings already exist."""
         try:
-            with open(json_file_path, 'r', encoding='utf-8') as file:
-                data = json.load(file)
-                print(f"✅ Loaded university data from {json_file_path}")
+            # Skip if embeddings are already present
+            if doc_info.get("embeddings") is not None and doc_info.get("text"):
+                print(f"Skipping {doc_name}, embeddings already loaded.")
+                return
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(doc_info["url"]) as response:
+                    pdf_bytes = await response.read()
+            
+            pdf_file = BytesIO(pdf_bytes)
+            text = ""
+            with fitz.open(stream=pdf_file, filetype="pdf") as pdf:
+                for page in pdf:
+                    page_text = page.get_text()
+                    if page_text:
+                        text += page_text + "\n"
+            
+            self.pdf_docs[doc_name]["text"] = text
+            # Split text into chunks
+            chunks = [text[i:i+1000] for i in range(0, len(text), 1000)]
+            self.pdf_docs[doc_name]["chunks"] = chunks
+
+            # Compute embeddings asynchronously only if sentence_model is available
+            if self.sentence_model:
+                loop = asyncio.get_event_loop()
+                embeddings = await loop.run_in_executor(
+                    None, lambda: self.sentence_model.encode(
+                        chunks, show_progress_bar=False, convert_to_tensor=True
+                    )
+                )
+                self.pdf_docs[doc_name]["embeddings"] = embeddings
+                print(f"Loaded and embedded PDF: {doc_name}")
+            else:
+                print(f"Sentence model not loaded, skipping embeddings for {doc_name}")
+
+        except Exception as e:
+            print(f"Error loading {doc_name}: {e}")
+
+    async def load_all_pdfs(self):
+        """Load all PDFs concurrently and update corpus embeddings"""
+        tasks = [
+            self.load_pdf_async(doc_name, doc_info)
+            for doc_name, doc_info in self.pdf_docs.items()
+        ]
+        await asyncio.gather(*tasks)
+
+        # Recompute embeddings for the entire corpus (JSON + PDFs)
+        if self.corpus and self.sentence_model:
+            print(f"Creating embeddings for {len(self.corpus)} text segments (JSON + PDFs)...")
+            self.corpus_embeddings = self.sentence_model.encode(self.corpus, convert_to_tensor=True)
+            print("Semantic corpus ready")
+        
+    # Loading the data    
+    def load_data(self, json_file_path):
+        """Load JSON safely."""
+        try:
+            with open(json_file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                print(f"Loaded university data from {json_file_path}")
                 return data
-        except FileNotFoundError:
-            print(f"❌ Error: Could not find {json_file_path}")
-            print("Creating sample data structure...")
-            return self.create_sample_data()
-        except json.JSONDecodeError:
-            print(f"❌ Error: Invalid JSON format in {json_file_path}")
+        except Exception as e:
+            print(f"Error loading JSON: {e}")
             return {}
     
-    def create_sample_data(self): # needs updating
-        """Create sample data structure if JSON file is not found"""
-        return {
-            "admission_requirements": {
-                "undergraduate": {
-                    "requirements": "High school diploma, SAT/ACT scores, transcripts, essay",
-                    "deadline": "January 15th for fall semester",
-                    "link": "https://university.edu/admissions/undergraduate"
-                },
-                "graduate": {
-                    "requirements": "Bachelor's degree, GRE scores, recommendation letters",
-                    "deadline": "December 1st for fall semester",
-                    "link": "https://university.edu/admissions/graduate"
-                }
-            },
-            "academic_calendar": {
-                "fall_2024": {
-                    "start_date": "August 28, 2024",
-                    "end_date": "December 15, 2024",
-                    "registration": "August 15-25, 2024"
-                }
-            },
-            "departments": {
-                "engineering": {
-                    "contact": "engineering@university.edu",
-                    "programs": ["Computer Science", "Electrical Engineering", "Mechanical Engineering"]
-                }
-            },
-            "faqs": [
-                {
-                    "question": "What are the admission requirements?",
-                    "answer": "Requirements vary by program. Please check specific program pages."
-                }
-            ]
-        }
-    
+    # Add the semantic embeddings onto the text corpus
     def prepare_semantic_corpus(self):
         """Prepare text corpus with semantic embeddings"""
         self.corpus = []
@@ -215,8 +332,10 @@ class UniversityChatbot():
                     current_path = f"{path}[{i}]"
                     extract_text_recursive(item, current_path, parent_key, data)
             elif isinstance(data, str) and len(data.strip()) > 10:
+                # Extract additional fields from parent object
                 additional_fields = {}
                 if parent_obj and isinstance(parent_obj, dict):
+                    # Look for common additional fields like 'info', 'url', 'link', etc.
                     for field in ['info', 'url', 'link', 'source', 'reference']:
                         if field in parent_obj and parent_obj[field]:
                             additional_fields[field] = parent_obj[field]
@@ -226,26 +345,28 @@ class UniversityChatbot():
                     'path': path,
                     'parent_key': parent_key,
                     'content': data.strip(),
-                    **additional_fields 
+                    **additional_fields  # Include additional fields from parent object
                 })
         
         extract_text_recursive(self.data)
         
         if self.corpus and self.sentence_model:
-            print(f"🔍 Creating embeddings for {len(self.corpus)} text segments...")
+            print(f"Creating embeddings for {len(self.corpus)} text segments...")
             self.corpus_embeddings = self.sentence_model.encode(self.corpus, convert_to_tensor=True)
-            print("✅ Semantic corpus ready")
+            print("Semantic corpus ready")
     
+    # Creating and adding embeddings for intent patterns and for better semantic matching
     def create_intent_embeddings(self):
         """Create embeddings for intent patterns for better semantic matching"""
         self.intent_embeddings = {}
         
         for intent, patterns in self.intent_patterns.items():
             # Create embeddings for all patterns of this intent
-            pattern_embeddings = self.sentence_model.encode(patterns, convert_to_tensor=True)
+            pattern_embeddings = self.sentence_model.encode(patterns, convert_to_tensor=True, batch_size=16)
             # Use mean embedding as the intent representation
             self.intent_embeddings[intent] = torch.mean(pattern_embeddings, dim=0)
     
+    # Identifying user intent using semantic similarity
     def identify_intent_semantic(self, user_input):
         """Identify user intent using semantic similarity"""
         if not self.sentence_model or not hasattr(self, 'intent_embeddings'):
@@ -267,6 +388,7 @@ class UniversityChatbot():
         
         return best_intent, best_score
     
+    # Falling back using keyword matching 
     def identify_intent_fallback(self, user_input):
         """Fallback intent identification using keyword matching"""
         user_input_lower = user_input.lower()
@@ -285,6 +407,7 @@ class UniversityChatbot():
         
         return 'general', 0.0
     
+    # Extradting entities and adding similar names to recognize them 
     def extract_entities_enhanced(self, user_input):
         """Enhanced entity extraction with better NLP"""
         entities = {
@@ -332,6 +455,7 @@ class UniversityChatbot():
         
         return entities
     
+    # Find most relevant content using semantic similarity which includes fallback check, encoding query, comparing similarities, best matching and filtering based on the similarity threshold
     def find_relevant_content_semantic(self, query, top_k=5, threshold=0.25):
         """Find most relevant content using semantic similarity"""
         if not self.sentence_model or self.corpus_embeddings is None or len(self.corpus) == 0:
@@ -357,6 +481,7 @@ class UniversityChatbot():
         
         return results
     
+    # Fallback method for the previous one 
     def find_relevant_content_fallback(self, query, top_k=5):
         """Fallback content search using simple text matching"""
         query_lower = query.lower()
@@ -381,6 +506,7 @@ class UniversityChatbot():
         results.sort(key=lambda x: x['similarity'], reverse=True)
         return results[:top_k]
     
+    # Extracting links from content
     def extract_links_from_content(self, content):
         """Extract URLs from content"""
         url_pattern = r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
@@ -390,9 +516,10 @@ class UniversityChatbot():
     def format_table_from_html(self, html_content):
         """Convert HTML table to readable format"""
         if '<table' in str(html_content).lower():
-            return f"📊 **Table Data:**\n{str(html_content)}\n"
+            return f"Table Data:\n{str(html_content)}\n"
         return str(html_content)
     
+    # Help getter function to search for departments and colleges
     def get_colleges_and_departments(self):
         """Extract list of colleges and departments from data"""
         colleges = {}
@@ -402,9 +529,11 @@ class UniversityChatbot():
                 for key, value in data.items():
                     current_path = f"{path}/{key}" if path else key
                     
+                    # Check if this looks like a college or department
                     if any(term in key.lower() for term in ['college', 'school', 'faculty']):
                         colleges[key] = []
                         
+                        # Look for departments within this college
                         if isinstance(value, dict):
                             for sub_key in value.keys():
                                 if any(term in sub_key.lower() for term in ['department', 'dept', 'program']):
@@ -430,6 +559,7 @@ class UniversityChatbot():
         
         return colleges
 
+    # This function helps get admission requirements of undergraduate (found in FAQs), masters and PhD from links found in Admission Requirements section from the json file
     def handle_admission_requirements(self, entities, user_input):
         """Admission requirements handler with JSON navigation and follow-up support"""
 
@@ -449,17 +579,16 @@ class UniversityChatbot():
         if not entities['level']:
             self.conversation_state = "awaiting_admission_level"
             return (
-                "Hi! I'd be happy to help you with admission requirements. 😊\n\n"
-                "Could you please specify which level you're interested in?\n"
-                "🎓 **Undergraduate** (Bachelor's degree)\n"
-                "📚 **Masters** (Graduate degree)\n"
-                "🔬 **PhD** (Doctoral degree)\n\n"
+                "Hi! I'd be happy to help you with admission requirements. Could you please specify which level you're interested in?\n"
+                "Undergraduate (Bachelor's degree)\n"
+                "Masters (Graduate degree)\n"
+                "PhD (Doctoral degree)\n\n"
                 "Just reply with one of those!"
             )
 
-        self.conversation_state = None  
+        self.conversation_state = None  # Clear state
 
-        # Handle admission requirements for undergraduate
+        # Handle UNDERGRADUATE requests
         if entities['level'] == 'undergraduate':
             # Look for FAQs section
             for section in self.data:
@@ -472,23 +601,24 @@ class UniversityChatbot():
                             url = section.get("url", "")
                             
                             return (
+                                "Undergraduate Admission Requirements: \n\n"
                                 f"{answer}\n\n"
-                                f"🔗 For more detailed information, visit: {url}"
+                                f"For more detailed information, visit: {url}"
                             )
                     
                     # If specific FAQ not found, provide general undergraduate info from FAQs
                     url = section.get("url", "")
                     return (
-                        "Undergraduate Admission Requirements:\n"
+                        "Undergraduate Admission Requirements: \n\n"
                         "Based on the available information, undergraduate admission requirements include:\n\n"
                         "• High school certificate (from within or outside the Kingdom)\n"
-                        "• General Aptitude Test scores (Qudrat scores)\n"
-                        "• Academic Achievement Test scores (Tahsili scores)\n"
-                        "• Each track and major requires different scores for each of these tests.\n\n"
+                        "• General Aptitude Test scores\n"
+                        "• Academic Achievement Test scores\n"
+                        "• Meeting specific program requirements\n\n"
                         f"For complete details and FAQs, visit: {url}"
                     )
 
-        # Handle admission requirements for masters
+        # Handle MASTERS requests
         elif entities['level'] == 'masters':
             # Look for Admission Requirements section
             for section in self.data:
@@ -509,6 +639,7 @@ class UniversityChatbot():
                                     content += f"\n• **{title}**: {body}"
                             
                             return (
+                                "Master's Programs Admission Requirements: \n\n"
                                 f"{content}\n\n"
                                 f"For complete information, visit: {url}"
                             )
@@ -517,10 +648,10 @@ class UniversityChatbot():
                     url = section.get("url", "")
                     content = section.get("content", "")
                     return (
-                        "Master's Programs Admission Requirements: \n"
+                        "Master's Programs Admission Requirements\n\n"
                         f"{content}\n\n"
                         "Please check the admission requirements section for specific master's program criteria.\n\n"
-                        f"🔗 For complete information, visit: {url}"
+                        f" For complete information, visit: {url}"
                     )
 
         # Handle PHD requests
@@ -544,18 +675,19 @@ class UniversityChatbot():
                                     content += f"\n• **{title}**: {body}"
                             
                             return (
+                                "PhD's Programs Admission Requirements: \n\n"
                                 f"{content}\n\n"
-                                f"🔗 For complete information, visit: {url}"
+                                f"For complete information, visit: {url}"
                             )
                     
                     # If PhD Programs not found in children, provide general info
                     url = section.get("url", "")
                     content = section.get("content", "")
                     return (
-                        "PhD Programs Admission Requirements: \n"
+                        "PhD Programs Admission Requirements: \n\n"
                         f"{content}\n\n"
                         "Please check the admission requirements section for specific PhD program criteria.\n\n"
-                        f"🔗 For complete information, visit: {url}"
+                        f"For complete information, visit: {url}"
                     )
 
         # Fallback if level is recognized but no specific info found
@@ -564,8 +696,9 @@ class UniversityChatbot():
             "Please try contacting the admissions office directly or visit the university website for the most accurate and up-to-date information."
         )
 
-    def handle_academic_calendar(self):
-        """Return the academic calendar from structured JSON with table formatting"""
+    # This function helps get academic calendar from the json file and format it into a table by putting each row on top of another (since it is not in HTML format)
+    def handle_academic_calendar(self, query: str = None):
+        """Return academic calendar or specific date/event if query is given"""
 
         # Look for the academic calendar item in self.data
         calendar_item = next(
@@ -575,39 +708,66 @@ class UniversityChatbot():
 
         if not calendar_item:
             return (
-                "Academic Calendar:"
-                "I couldn't find the academic calendar in our current data. "
-                "Please visit the registrar’s official site for updated info.\n\n"
+                "Academic Calendar\n\n"
+                "I couldn't find the academic calendar in our data. "
+                "Please visit the registrar’s official site for updated info:\n\n"
                 "https://dar.ksu.edu.sa/en/CurrentCalendar"
             )
 
         url = calendar_item.get("url", "")
         table = calendar_item.get("table", {})
-
         headers = table.get("headers", [])
         rows = table.get("rows", [])
 
-        # Clean up any duplicate header row in the rows
+        # Clean duplicate header row if present
         if rows and headers and rows[0] == headers:
             rows = rows[1:]
 
-        # Start formatting
-        response = "Academic Calendar: \n"
-        response += f"Here is the calendar: ({url})\n\n"
+        # If user asked for a specific event/date
+        if query:
+            query_lower = query.lower()
 
-        # Format headers
-        if headers and all(isinstance(h, str) for h in headers):
+            for row in rows:
+                row_text = " ".join(row).lower()
+
+                # If query matches part of an event OR part of a date
+                if query_lower in row_text:
+                    gregorian_date = row[0] if len(row) > 0 else "N/A"
+                    hijri_date = row[1] if len(row) > 1 else "N/A"
+                    day = row[2] if len(row) > 2 else "N/A"
+                    event = row[3] if len(row) > 3 else "N/A"
+
+                    return (
+                        f"{event}\n\n"
+                        f"- Gregorian Date: {gregorian_date}\n"
+                        f"- Hijri Date: {hijri_date}\n"
+                        f"- Day: {day}\n\n"
+                        f"Full calendar: {url}"
+                    )
+
+            return f"Sorry, I couldn’t find anything about '{query}'. Please check the full calendar: {url}"
+
+        # Otherwise, return full table in a neat markdown format
+        response = "Academic Calendar\n\n"
+        response += f"View Full Calendar: {url}\n\n"
+
+        if headers:
             response += "| " + " | ".join(headers) + " |\n"
             response += "|" + " --- |" * len(headers) + "\n"
 
-        # Format rows
         for row in rows:
-            # Ensure each row has exactly 4 items
             padded_row = row + [""] * (len(headers) - len(row))
             response += "| " + " | ".join(padded_row[:len(headers)]) + " |\n"
 
-        return response + "\n Need specific dates?** You can ask about registration deadlines, exam schedules, or semester start dates!"
-      
+        response += (
+            "\nTip: You can also ask me things like:\n"
+            "- ‘When do final exams start?’\n"
+            "- ‘What’s the registration deadline?’\n"
+            "- ‘When is the National Day holiday?’"
+        )
+        return response
+
+    # This function gets the college categories, colleges, departments, their about, contact info and faculty directories
     def handle_degree_programs(self, entities, user_input):
         """
         Simple method to navigate college hierarchy
@@ -698,11 +858,6 @@ class UniversityChatbot():
                         search_recursive(item, f"{path}[{i}]")
             
             search_recursive(json_data)
-                
-            # Look specifically for department-like nodes
-            dept_nodes = [(path, title) for path, title in checked_nodes if 'department' in title.lower()]
-            for i, (path, title) in enumerate(dept_nodes[:10]):
-                print(f"  {i+1}. {title} (at {path})")
             
             return best_match if best_score > 30 else None
         
@@ -738,11 +893,11 @@ class UniversityChatbot():
         target_node = find_node(user_input.strip(), self.data)
         
         if not target_node:
-            return ("I apologize. I could not find that. Try:\n"
-                    "• 'Colleges' to see all categories\n"
-                    "• 'Science Colleges' or any college categories to see colleges in category\n"
-                    "• 'College of Engineering' or any colleges to check out specific college\n"
-                    "• 'Computer Science Department' or any Academic departments in a college to get department info")
+            return (" I couldn't find that. Try:\n"
+                    "• 'Colleges' - see all categories\n"
+                    "• 'Science Colleges' - see colleges in category\n"
+                    "• 'College of Engineering' - specific college\n"
+                    "• 'Computer Science Department' - department info")
         
         node_type = get_node_type(target_node)
         title = target_node.get('title', '')
@@ -750,17 +905,17 @@ class UniversityChatbot():
         # Handle based on node type
         if node_type == 'colleges_root':
             # Show college categories only
-            response = "King Saud University - Colleges:\n"
-            response += "College Categories:\n"
+            response = "King Saud University - Colleges\n\n"
+            response += "College Categories:\n\n"
             
             total_colleges = 0
             for category in target_node.get('children', []):
                 if isinstance(category, dict) and 'title' in category:
                     college_count = len(category.get('children', []))
                     total_colleges += college_count
-                    response += f"• **{category['title']}** ({college_count} colleges)\n"
+                    response += f"• {category['title']} ({college_count} colleges)\n"
             
-            response += f"\n Total: {total_colleges} colleges\n\n"
+            response += f"\nTotal: {total_colleges} colleges\n\n"
             response += "Ask about any category above for details!"
             return response
         
@@ -770,12 +925,12 @@ class UniversityChatbot():
             colleges = target_node.get('children', [])
             
             if colleges:
-                response += f"**Colleges ({len(colleges)} total):**\n\n"
+                response += f"Colleges ({len(colleges)} total):\n\n"
                 for i, college in enumerate(colleges, 1):
                     if isinstance(college, dict) and 'title' in college:
                         response += f"{i}. {college['title']}\n"
                         if college.get('url'):
-                            response += f"    {college['url']}\n"
+                            response += f"   {college['url']}\n"
                         response += "\n"
             
             response += "Ask about any college above for details!"
@@ -808,7 +963,7 @@ class UniversityChatbot():
                     if isinstance(dept, dict) and 'title' in dept:
                         response += f"{i}. {dept['title']}\n"
                 
-                response += "\n Ask about any department for detailed info!"
+                response += "\nAsk about any department for detailed info!"
             
             return response
         
@@ -845,81 +1000,7 @@ class UniversityChatbot():
         else:
             return f"Found '{title}' but couldn't determine its type. Please be more specific."
        
-    def handle_faculty_directory(self, entities, user_input):
-        """Handle faculty directory by parsing hierarchical structure"""
-        
-        if not entities['college'] and not entities['department']:
-            # Show available colleges and departments
-            response = "👥 **Faculty Directories**\n\nPlease specify which department or college:\n\n"
-            response += "**Available Colleges:**\n"
-            response += "• College of Business Administration\n"
-            response += "• College of Architecture and Planning\n"
-            response += "• College of Computer and Information Sciences\n"
-            response += "• College of Food and Agricultural Sciences\n"
-            response += "• College of Engineering\n"
-            response += "• College of Applied Studies\n"
-            response += "• Health Colleges\n\n"
-            response += "Example: 'Show faculty for Computer Science department' or 'Faculty directory for College of Engineering'"
-            return response
-
-        # Parse the hierarchical data structure to find faculty links
-        faculty_data = self.parse_faculty_structure()
-        
-        response = "Faculty Directory\n\n"
-        faculty_found = False
-        
-        college_query = entities.get('college', '').lower()
-        department_query = entities.get('department', '').lower()
-        
-        for college_name, departments in faculty_data.items():
-            # Check if this college matches the query
-            if college_query and college_query not in college_name.lower():
-                continue
-                
-            college_has_matches = False
-            college_response = f"{college_name}\n"
-            
-            for dept_name, faculty_links in departments.items():
-                # Check if this department matches the query
-                if department_query and department_query not in dept_name.lower():
-                    continue
-                    
-                if faculty_links:
-                    faculty_found = True
-                    college_has_matches = True
-                    college_response += f"\n{dept_name}\n"
-                    
-                    for faculty_link in faculty_links:
-                        title = faculty_link.get('title', 'Faculty Directory')
-                        url = faculty_link.get('url', '#')
-                        college_response += f"[{title}]({url})\n"
-                    
-                    college_response += "\n"
-            
-            if college_has_matches:
-                response += college_response
-        
-        # If no specific query, show all faculty links
-        if not college_query and not department_query:
-            for college_name, departments in faculty_data.items():
-                response += f"{college_name}\n"
-                for dept_name, faculty_links in departments.items():
-                    if faculty_links:
-                        response += f"\n{dept_name}\n"
-                        for faculty_link in faculty_links[:5]:  # Limit to 2 links per dept
-                            title = faculty_link.get('title', 'Faculty Directory')
-                            url = faculty_link.get('url', '#')
-                            response += f"[{title}]({url})\n"
-                        response += "\n"
-                response += "\n"
-            faculty_found = True
-        
-        if not faculty_found:
-            response += "No faculty directory links found for the specified criteria.\n"
-            response += "Try searching for a specific college or department name."
-        
-        return response
-
+    # This function finds the housing information (things that I thought were important)
     def handle_housing(self, entities, user_input):
         """Handle housing queries using the correct Housing section"""
         
@@ -934,7 +1015,8 @@ class UniversityChatbot():
             housing_types = self.get_housing_types(housing_section)
             response = "I'd be happy to help with housing information! Please specify:\n\n"
             for housing_type in housing_types:
-                response += f"{housing_type}\n"
+                emoji = "🎓" if "student" in housing_type.lower() else "👨‍🏫"
+                response += f"{emoji} {housing_type}\n"
             return response + "\nWhich type of housing are you interested in?"
         
         # Handle faculty housing
@@ -947,6 +1029,7 @@ class UniversityChatbot():
         
         return "Please specify faculty or student housing."
 
+    # This addition function gets the housing information
     def find_housing_with_data(self):
         """Find the Housing section that contains actual data (not empty)"""
         def search_recursive(data):
@@ -970,6 +1053,7 @@ class UniversityChatbot():
         
         return search_recursive(self.data)
 
+    # This additional function gets housing type whether it is student or faculty housing
     def get_housing_types(self, housing_section):
         """Extract housing types from the housing section"""
         housing_types = []
@@ -979,6 +1063,7 @@ class UniversityChatbot():
                 housing_types.append(title)
         return housing_types
 
+    # This additional function helps navigating Faculty housing sections that I thought were important
     def handle_faculty_housing(self, housing_section):
         """Handle faculty housing navigation"""
         # Find Faculty Housing section
@@ -1012,6 +1097,7 @@ class UniversityChatbot():
         
         return response
 
+    # This additional function helps navigating Student housing sections that I thought were important
     def handle_student_housing(self, housing_section):
         """Handle student housing navigation"""
         student_housing = None
@@ -1024,7 +1110,7 @@ class UniversityChatbot():
             available_children = [child.get('title', 'No title') for child in housing_section.get('children', [])]
             return f"Student housing not found. Available options: {', '.join(available_children)}"
         
-        response = "Student Housing:\n\n"
+        response = "Student Housing\n\n"
         
         for child in student_housing.get('children', []):
             title = child.get('title', '')
@@ -1038,9 +1124,9 @@ class UniversityChatbot():
                 # Format the content nicely
                 formatted_content = self.format_housing_content(content)
                 response += f"{formatted_content}\n"
-             
+            
             if url:
-                response += f"🔗 [Access {title}]({url})\n"
+                response += f"[Access {title}]({url})\n"
             
             # Show child links if any (like for Female Student Housing)
             if child.get('children'):
@@ -1050,25 +1136,27 @@ class UniversityChatbot():
         
         return response
 
+    # Gets child links 
     def display_child_links(self, parent_section):
         """Display children of a section (like Related Links)"""
         if not parent_section.get('children'):
             return ""
         
-        response = f"\nAvailable options:\n"
+        response = f"\n**Available options:**\n"
         
         for child in parent_section.get('children', []):
             child_title = child.get('title', '')
             child_url = child.get('url', '')
             
             if child_title:
-                response += f"• {child_title}"
+                response += f"• **{child_title}**"
                 if child_url:
                     response += f" - [Access here]({child_url})"
                 response += "\n"
         
         return response
 
+    # Editing the housing information content for better readability
     def format_housing_content(self, content):
         """Format housing content for better readability"""
         if not content:
@@ -1089,6 +1177,7 @@ class UniversityChatbot():
         
         return '\n'.join(formatted_lines)
     
+    # This is to handle library sections, their libraries and content of the libraries along with Location links
     def handle_library(self, entities, user_input):
         user_input_lower = user_input.lower()
 
@@ -1117,7 +1206,7 @@ class UniversityChatbot():
         # STEP 1: Start from top-level "Libraries"
         libraries_root = find_matching_node(self.data, "libraries")
         if not libraries_root:
-            return "❌ Could not find 'Libraries' section in data."
+            return "Could not find 'Libraries' section in data."
 
         # STEP 2: If user specifies a category (e.g., Shared libraries)
         selected_category = find_matching_child(libraries_root, user_input_lower)
@@ -1138,16 +1227,16 @@ class UniversityChatbot():
 
                 response = f"{matched_library['title']}\n\n"
                 if info:
-                    response += f"Information:\n{info}\n"
+                    response += f"Information:\n{info}\n\n"
                 if contact:
-                    response += f"Contact Info:\n{contact}\n"
+                    response += f"Contact Info:\n{contact}\n\n"
                 if location:
                     response += f"Location: {location}"
                 return response.strip()
 
             # STEP 2b: User just selected the category, list children
             library_titles = [child["title"] for child in selected_category.get("children", [])]
-            return f"Here are the libraries under {selected_category['title']}:\n" + "\n".join(f"- {title}" for title in library_titles)
+            return f"Here are the libraries under **{selected_category['title']}**:\n" + "\n".join(f"- {title}" for title in library_titles)
 
         # STEP 3: User mentioned a library directly without saying category
         for category in libraries_root.get("children", []):
@@ -1165,23 +1254,23 @@ class UniversityChatbot():
 
                 response = f"{matched_library['title']}\n\n"
                 if info:
-                    response += f"Information:\n{info}\n"
+                    response += f"Information:\n{info}\n\n"
                 if contact:
-                    response += f"Contact Info:\n{contact}\n"
+                    response += f"Contact Info:\n{contact}\n\n"
                 if location:
-                    response += f"Location: {location}"
+                    response += f"Location:{location}"
                 return response.strip()
 
         # STEP 4: User only said "libraries" → ask to choose category
         category_titles = [cat["title"] for cat in libraries_root.get("children", [])]
         return "Would you like to know about one of the following library categories?\n" + "\n".join(f"- {title}" for title in category_titles)
     
+    # This function is to scrape grading system scale and add the PDF
     def handle_grading_system(self):
         """Handle grading system with semantic search"""
         query = "grading system grade scale GPA evaluation assessment"
         relevant_content = self.find_relevant_content_semantic(query, top_k=5)
-        
-        response = "Grading System\n"
+        response = "Grading System:\n\n"
         
         for content in relevant_content[:3]:
             content_text = content['content']
@@ -1190,51 +1279,53 @@ class UniversityChatbot():
             # Extract links from content text
             links = self.extract_links_from_content(content_text)
             if links:
-                response += f"🔗 [Grading policy PDF]({links[0]})\n\n"
+                response += f"[Grading policy PDF]({links[0]})\n\n"
             
             # Check metadata for additional fields like 'info'
             metadata = content.get('metadata', {})
             if 'info' in metadata and metadata['info']:
-                response += f"Here are complete Study and Examinations Regulations PDF:({metadata['info']})\n\n"
+                response += f"[Study and Examinations Regulations PDF]({metadata['info']})\n\n"
             elif 'url' in metadata and metadata['url']:
-                response += f"Additional information:({metadata['url']})\n\n"
+                response += f"[Additional information]({metadata['url']})\n\n"
         
         if not relevant_content:
             response += "Grading system information is not available in our current database. Please check the student handbook or contact academic affairs.\n\n"
         
         return response
     
+    # This function is to handle the plagiarism with the PDF
     def handle_plagiarism(self):
         """Handle plagiarism queries with semantic search"""
         query = "plagiarism academic integrity policy cheating misconduct"
         relevant_content = self.find_relevant_content_semantic(query, top_k=5)
         
-        response = "Academic Integrity & Plagiarism Policy\n"
+        response = "Academic Integrity & Plagiarism Policy\n\n"
         
         for content in relevant_content[:3]:
             response += content['content'] + "\n\n"
             links = self.extract_links_from_content(content['content'])
             if links:
-                response += f"Full policy: ({links[0]})\n\n"
+                response += f"[Full policy]({links[0]})\n\n"
         
         if not relevant_content:
             response += "Plagiarism policy information is not available in our current database. Please check the student handbook or contact academic affairs.\n\n"
         
         return response
     
+    # This function is to handle the attendance rules with the PDF
     def handle_attendance(self):
         """Handle attendance queries"""
         query = "attendance policy class attendance requirements"
         relevant_content = self.find_relevant_content_semantic(query, top_k=3)
         
-        response = "Attendance Policy: \n"
+        response = "Attendance Policy\n\n"
         
         if relevant_content:
             for content in relevant_content:
                 response += content['content'] + "\n\n"
                 links = self.extract_links_from_content(content['content'])
                 if links:
-                    response += f"Attendance policy: ({links[0]})\n\n"
+                    response += f"[Attendance policy]({links[0]})\n\n"
         else:
             response += "Please refer to the grading system document for detailed attendance requirements.\n\n"
         
@@ -1246,19 +1337,17 @@ class UniversityChatbot():
             metadata = content.get('metadata', {})
             # Check if this is grading system content and has info field
             if 'info' in metadata and metadata['info']:
-                response += f"📖 Please refer to the Study and Examinations Regulations for detailed attendance policy:\n"
-                response += f"Attendance found here: ({metadata['info']})\n\n"
+                response += f"Please refer to the Study and Examinations Regulations for detailed attendance policy:\n"
+                response += f"[Attendance found here: ]({metadata['info']})\n\n"
                 break
         
         return response
     
+    # This is to scrape the research labs links
     def handle_research_labs(self):
         """Handle research labs and facilities - find Research node with Labs child"""
         
-        response = "Research Labs & Facilities: \n"
-        
-        # This assumes you have access to the original JSON data
-        # You'll need to replace 'self.json_data' with however you access your JSON
+        response = "Research Labs & Facilities\n\n"
         
         def find_research_with_labs(data):
             """Recursively find Research node that has Labs as a child"""
@@ -1303,7 +1392,7 @@ class UniversityChatbot():
                     
                     response += f"{i}. **{title}**\n"
                     if url:
-                        response += f"   🔗 {url}\n"
+                        response += f"   {url}\n"
                     response += "\n"
             else:
                 response += "Could not find Research node with Labs child.\n\n"
@@ -1314,13 +1403,14 @@ class UniversityChatbot():
         
         return response
 
+    # This function adds all the IT helpdesk for student and staff and paths inside. 
     def handle_it_support(self, entities, user_input):
         from difflib import get_close_matches
 
         # Find IT Helpdesk node
         it_helpdesk = next((item for item in self.data if item.get("title", "").lower() == "it helpdesk"), None)
         if not it_helpdesk:
-            return "⚠️ Sorry, I couldn't find the IT Helpdesk information."
+            return "Sorry, I couldn't find the IT Helpdesk information."
 
         user_input_lower = user_input.lower()
         user_type = None
@@ -1336,7 +1426,7 @@ class UniversityChatbot():
         # Navigate to the relevant section
         section = next((child for child in it_helpdesk.get("children", []) if child.get("title", "").lower() == user_type.lower()), None)
         if not section:
-            return f"⚠️ Sorry, I couldn’t find IT support info for {user_type}."
+            return f"Sorry, I couldn’t find IT support info for {user_type}."
 
         # Extract all issues and sub-issues
         def extract_issues_with_hierarchy(node, parent_title=None):
@@ -1364,7 +1454,7 @@ class UniversityChatbot():
             )
 
         # If no match found, show all options (parents and their children)
-        options_text = f"📋 I couldn't find an exact match. Here are support topics for {user_type}:\n\n"
+        options_text = f"I couldn't find an exact match. Here are support topics for {user_type}:\n\n"
         grouped = {}
         for full_title, child_title in all_issues:
             parent = full_title.split("→")[0].strip()
@@ -1379,39 +1469,7 @@ class UniversityChatbot():
 
         return options_text
     
-    def handle_contact_info(self, entities, user_input):
-        """Handle contact information queries with semantic search"""
-        query_parts = ["contact information"]
-        
-        if entities['department']:
-            query_parts.append(entities['department'])
-        if entities['college']:
-            query_parts.append(entities['college'])
-        
-        # Add any specific departments mentioned in the query
-        if self.nlp:
-            doc = self.nlp(user_input)
-            for ent in doc.ents:
-                if ent.label_ == "ORG":
-                    query_parts.append(ent.text)
-        
-        query = " ".join(query_parts) + " phone email address office"
-        relevant_content = self.find_relevant_content_semantic(query, top_k=5)
-        
-        response = "📞 **Contact Information**\n\n"
-        
-        for content in relevant_content[:4]:
-            response += content['content'] + "\n\n"
-            links = self.extract_links_from_content(content['content'])
-            if links:
-                response += f"🔗 [Contact directory]({links[0]})\n\n"
-        
-        if not relevant_content:
-            response += ("Contact information is not available in our current database. "
-                        "Please check the university directory or contact the main office.\n\n")
-        
-        return response
-    
+    #---------------- THESE THINGS HAVE NOT BEEN SCRAPED YET ---------------------------------------#
     def handle_fees_tuition(self, user_input):
         """Handle tuition and fees queries"""
         query = "tuition fees cost payment financial charges"
@@ -1450,6 +1508,9 @@ class UniversityChatbot():
         
         return response
     
+    #-----------------------------------------------------------------------------------------#
+    
+    # General queries
     def handle_general_query_enhanced(self, user_input):
         """Enhanced general query handling with better semantic understanding"""
         # First, try to find relevant content
@@ -1496,6 +1557,8 @@ class UniversityChatbot():
         
         return response
     
+
+    # This is all the chats handler functions inside
     def chat(self, user_input):
         """Enhanced main chat function with better semantic understanding"""
         # Identify intent using semantic similarity
@@ -1513,8 +1576,8 @@ class UniversityChatbot():
             return self.handle_academic_calendar()
         elif intent == 'degree_programs':
             return self.handle_degree_programs(entities, user_input)
-        elif intent == 'faculty':
-            return self.handle_faculty_directory(entities, user_input)
+        #elif intent == 'faculty':
+        #    return self.handle_faculty_directory(entities, user_input)
         elif intent == 'housing':
             return self.handle_housing(entities, user_input)
         elif intent == 'library':
@@ -1538,24 +1601,29 @@ class UniversityChatbot():
         else:
             return self.handle_general_query_enhanced(user_input)
     
+    # Interactive chats
     def run_interactive_chat(self):
         """Run interactive chat session with enhanced experience"""
-        print("🎓 Welcome! I can help with admissions, academics, libraries, housing, faculty, fees, research, and more. Type your question or 'help' for examples.")
-        print("💡 Tip: Ask natural questions like 'How do I apply for undergraduate admission?' or 'What are the library hours?'")
+        print("Welcome! I can help with admissions, academics, libraries, housing, faculty, fees, research, and more. Type your question or 'help' for examples.")
+        print("Tip: Ask natural questions like 'How do I apply for undergraduate admission?' or 'What are the library hours?'")
         print("Type 'help' for examples, or 'exit' to quit.\n")
         
         conversation_count = 0
         
         while True:
             try:
-                user_input = input("🙋 You: ").strip()
+                user_input = input("You: ").strip()
+
+                if user_input.lower() in ['hi', 'hello', 'hey', 'good morning', 'good afternoon']:
+                    print(" Assistant: Hello! How can I help you today? \n")
+                    continue
                 
                 if user_input.lower() in ['exit', 'quit', 'bye', 'goodbye']:
-                    print("🤖 Assistant: Thank you for using the University AI Assistant! Have a wonderful day! 👋")
+                    print("Assistant: Thank you for using the University AI Assistant! Have a wonderful day! 👋")
                     break
                 
                 if user_input.lower() == 'help':
-                    print("🤖 Assistant: Here are some example questions you can ask:")
+                    print("Assistant: Here are some example questions you can ask:")
                     print("• 'What are the admission requirements for undergraduate programs?'")
                     print("• 'Show me the academic calendar'")
                     print("• 'I need information about computer science department'")
@@ -1568,7 +1636,7 @@ class UniversityChatbot():
                     continue
                 
                 if not user_input:
-                    print("🤖 Assistant: I'm here to help! Please ask me something about the university. 😊\n")
+                    print("🤖 Assistant: I'm here to help! Please ask me something about the university. \n")
                     continue
                 
                 print("🤖 Assistant: ", end="")
@@ -1579,39 +1647,39 @@ class UniversityChatbot():
                 
                 # Provide helpful suggestions every few interactions
                 if conversation_count % 5 == 0:
-                    print("💡 **Quick tip:** You can ask follow-up questions or request more specific information anytime!\n")
+                    print(" **Quick tip:** You can ask follow-up questions or request more specific information anytime!\n")
                 
             except KeyboardInterrupt:
-                print("\n🤖 Assistant: Goodbye! Thanks for using the University AI Assistant! 👋")
+                print("\nAssistant: Goodbye! Thanks for using the University AI Assistant!")
                 break
             except Exception as e:
-                print(f"🤖 Assistant: I encountered an error processing your request. Please try again! 🔧")
+                print(f"Assistant: I encountered an error processing your request. Please try again! 🔧")
                 print(f"(Technical details: {str(e)})\n")
 
+# Main function to run all the functions
 def main():
     """Main function to run the enhanced chatbot"""
     # Initialize chatbot with your JSON file
     json_file_path = "C:\\Nawal\\IT Department\\Practical Training\\Final Chatbot\\data_backups\\menu_hierarchy.json"  # Replace with your actual JSON file path
     
-    print("🚀 Starting University AI Assistant...")
+    print("Starting University AI Assistant...")
     
     try:
-        chatbot = UniversityChatbot(json_file_path)
+        #chatbot = UniversityChatbot(json_file_path)
+        chatbot = asyncio.run(initialize_chatbot(json_file_path))
         chatbot.run_interactive_chat()
     except KeyboardInterrupt:
-        print("\n👋 Goodbye!")
+        print("\nGoodbye!")
     except Exception as e:
-        print(f"\n❌ Error initializing chatbot: {str(e)}")
-        print("\n🔧 **Setup Requirements:**")
+        print(f"\nError initializing chatbot: {str(e)}")
+        print("\nSetup Requirements:")
         print("1. Install required packages:")
         print("   pip install sentence-transformers transformers torch nltk spacy scikit-learn")
         print("2. Download spaCy model:")
         print("   python -m spacy download en_core_web_sm")
         print("3. Ensure your JSON file path is correct")
         print("4. Make sure you have sufficient disk space for model downloads")
-        print("\n💡 **Note:** The chatbot will work with fallback methods if some models fail to load.")
+        print("\nNote: The chatbot will work with fallback methods if some models fail to load.")
 
 if __name__ == "__main__":
     main()
-
-
